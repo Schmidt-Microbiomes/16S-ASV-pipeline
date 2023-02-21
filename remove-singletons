@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""
+Remove singletons from shared and corresponding fasta file
+
+This script is part of the Schmidt Lab 16S amplicon ASV pipeline.
+"""
+import argparse
+
+argp = argparse.ArgumentParser(description=__doc__)
+argp.add_argument('fasta_file')
+argp.add_argument('shared_file')
+
+args = argp.parse_args()
+
+singles = set()
+print(f'Reading {args.shared_file} and compiling singletons...', end='',
+      flush=True)
+with open(args.shared_file) as ifile:
+    _, _, _, *asvs = ifile.readline().split()
+    zeros = set(asvs)
+    for line in ifile:
+        _, _, _, *row = line.split()
+        for asv, count in zip(asvs, row):
+            if count != '0':
+                if asv in zeros:
+                    zeros.remove(asv)
+                    singles.add(asv)
+                elif asv in singles:
+                    singles.remove(asv)
+
+    if zeros:
+        print(f' WARNING: have {len(zeros)} zero ASVS: {sorted(zeros)}')
+print(f' [OK]\n got {len(singles)} singletons among {len(asvs)} ASVs')
+
+single_filter = [i if i in singles else None for i in asvs]
+numasvs = len(asvs) - len(singles)
+singletons = []
+
+shared_out_name = list(args.shared_file.rpartition('.'))
+shared_out_name[1] = 'rmsingl'
+shared_out_name = '.'.join(shared_out_name)
+print(f'Copy-filter shared file saving as {shared_out_name} ...', end='',
+      flush=True)
+with open(args.shared_file) as ifile, open(shared_out_name, 'w') as ofile:
+    head = ifile.readline().rstrip('\n').split('\t')
+    ofile.write('\t'.join(head[:3]) + '\t')
+    # only write non-single columns:
+    ofile.write('\t'.join((
+        i for i, single in zip(head[3:], single_filter) if not single
+    )))
+    ofile.write('\n')
+    for line in ifile:
+        row = line.rstrip('\n').split('\t')
+        ofile.write(f'{row[0]}\t{row[1]}\t{numasvs}\t')
+        # only write non-single columns:
+        outrow = []
+        for count, singleton in zip(row[3:], single_filter):
+            if singleton is None:
+                outrow.append(count)
+            else:
+                if count != '0':
+                    singletons.append((singleton, row[1], int(count)))
+        ofile.write('\t'.join(outrow))
+        ofile.write('\n')
+print(' [OK]')
+
+
+single_out_name = args.shared_file.rpartition('.')[0]
+single_out_name += '.singletons'
+with open(single_out_name, 'w') as ofile:
+    for singleton, group, count in sorted(singletons, key=lambda x: -x[2]):
+        ofile.write(f'{singleton}\t{group}\t{count}\n')
+print(f'Singletons written to {single_out_name}')
+
+fasta_out_name = list(args.fasta_file.rpartition('.'))
+fasta_out_name[1] = 'rmsingl'
+fasta_out_name = '.'.join(fasta_out_name)
+print(f'Copy-filter fasta file saving as {fasta_out_name} ...', end='',
+      flush=True)
+with open(args.fasta_file) as ifile, open(fasta_out_name, 'w') as ofile:
+    while True:
+        head = ifile.readline()
+        if not head:
+            break
+        seq = ifile.readline()
+        asvid = head.split()[0].lstrip('>')
+        if asvid in singles:
+            singles.remove(asvid)
+            continue
+
+        ofile.write(head)
+        ofile.write(seq)
+print(' [OK]')
+if singles:
+    print(f'WARNING: {len(singles)} singletons not found in fasta file: '
+          f'{sorted(singles)[:40]}.')

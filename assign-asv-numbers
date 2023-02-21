@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""
+Assign ASV numbers based on reference and update reference
+
+This script is part Schmidt Lab 16S amplicon ASV pipeline.
+"""
+import argparse
+from pathlib import Path
+
+argp = argparse.ArgumentParser(description=__doc__)
+argp.add_argument('reference_fasta_file')
+argp.add_argument('fasta_file')
+argp.add_argument('shared_file')
+
+args = argp.parse_args()
+out_base = Path(args.fasta_file).stem
+
+print(f'Loading ref ASVs {args.reference_fasta_file} ...')
+asvs = {}
+with open(args.reference_fasta_file) as ifile:
+    while True:
+        head = ifile.readline()
+        if not head:
+            break
+        asvid = head.strip().lstrip('>').split()[0]
+        seq = ifile.readline().strip()
+
+        try:
+            num = int(asvid.removeprefix('ASV'))
+        except ValueError:
+            raise RuntimeError(f'failed parsing asv number: {head}')
+
+        asvs[seq] = num
+ref_high_num = max(asvs.values())
+print(f' [OK] found {len(asvs)} in reference / highest ASV number is '
+      f'{ref_high_num}')
+
+
+fasta_out_name = out_base + '.refd.fasta'
+print(f'ID mapping fasta file and saving as {fasta_out_name} ...')
+asvid_map = []
+high_num = ref_high_num
+with open(args.fasta_file) as ifile, open(fasta_out_name, 'w') as ofile:
+    while True:
+        head = ifile.readline()
+        if not head:
+            break
+        seq = ifile.readline().strip()
+        origid, *rest = head.strip().lstrip('>').split(maxsplit=1)
+        if rest:
+            rest = ' ' + rest[0]
+        else:
+            rest = ''
+
+        if seq in asvs:
+            num = asvs[seq]
+        else:
+            high_num += 1
+            num = high_num
+            asvs[seq] = num
+
+        asvid_map.append((origid, num))
+
+        ofile.write(f'>ASV{num} mothur:{origid}{rest}\n')
+        ofile.write(seq)
+        ofile.write('\n')
+print(f' [Ok] {high_num-ref_high_num} new ASV numbers assigned')
+
+# sanity check that mapping is 1-1
+if len(set((i for i, _ in asvid_map))) != len(asvid_map):
+    raise RuntimeError('duplicate in map\'s left side (dupe in fatsa file?)')
+if len(set((i for _, i in asvid_map))) != len(asvid_map):
+    raise RuntimeError('duplicate in map\'s right side (bug or bad ref?)')
+
+asvid_map = dict(asvid_map)
+
+ref_out = Path(args.reference_fasta_file).stem + '.updated.fasta'
+print(f'Saving updated reference as {ref_out} ...', end='', flush=True)
+with open(ref_out, 'w') as ofile:
+    for seq, num in sorted(asvs.items(), key=lambda x: x[1]):
+        ofile.write(f'>ASV{num}\n{seq}\n')
+print(f'{len(asvs)} [OK]')
+
+shared_out_name = out_base + '.refd.shared'
+print(f'ID mapping shared file and saviung as {shared_out_name} ...', end='',
+      flush=True)
+with open(args.shared_file) as ifile, open(shared_out_name, 'w') as ofile:
+    head = ifile.readline().split()
+    new_ids = []
+    for i in head[3:]:
+        try:
+            num = asvid_map.pop(i)
+        except KeyError as e:
+            raise RuntimeError(f'sequence ID "{i}" not found in ID mapping!') \
+                from e
+        new_ids.append(f'ASV{num}')
+    if asvid_map:
+        print(f'WARNING: {len(asvid_map)} names/nums from mapping missing in '
+              'shared file?')
+
+    # write new header
+    ofile.write('\t'.join(head[:3]))
+    ofile.write('\t')
+    ofile.write('\t'.join(new_ids))
+    ofile.write('\n')
+    # copy rest
+    for line in ifile:
+        ofile.write(line)
+print(' [OK]')

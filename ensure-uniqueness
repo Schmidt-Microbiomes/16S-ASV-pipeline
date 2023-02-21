@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+Ensure that Mothur ASV output actually has unique ASVs
+
+this will remove gaps and dots from the fasta file and check if all sequences
+are unique.  Counts for identical sequences are added up in the shared file.
+An updated shared file and a fasta file with corresponding names for unique
+sequences are saved.
+
+This script is part of the Schmidt Lab 16S amplicon ASV pipeline.
+"""
+# TODO: improve efficiency, ex: 1800 samples / 28G shared file needs 4h/600GB
+import argparse
+
+argp = argparse.ArgumentParser(description=__doc__)
+argp.add_argument('fasta_file')
+argp.add_argument('list_file')
+argp.add_argument('shared_file')
+argp.add_argument('-v', '--verbose', action='store_true')
+
+args = argp.parse_args()
+
+name_map = {}
+with open(args.list_file) as ifile:
+    print(f'Loading name map from {args.list_file} ...', end='', flush=True)
+    row1 = ifile.readline().split()[2:]
+    label, numasvs, *row2 = ifile.readline().split()
+
+    if label != 'asv':
+        raise RuntimeError(f'excpeted "asv" label, got: {label}')
+
+    try:
+        numasvs = int(numasvs)
+    except ValueError:
+        raise RuntimeError('failed to parse number of ASVs, got: {numasvs}')
+
+    name_map = {seqid: asvid for seqid, asvid in zip(row2, row1)}
+    if len(name_map) != numasvs:
+        raise RuntimeError(
+            'expected {numasvs} name mappings but got {len(name_map)}'
+        )
+    print(f' {len(name_map)} [OK]')
+
+seqs = {}
+with open(args.fasta_file) as ifile:
+    print(f'Loading sequences from {args.fasta_file}:')
+    rm_gaps_tab = str.maketrans('', '', '-.')
+    while True:
+        line = ifile.readline()
+        if line == '':
+            break
+        seqid = line.strip().strip('>')
+        seq = ifile.readline().strip()
+        if '-' not in seq:
+            raise RuntimeError('Really no gap in sequence')
+
+        seq = seq.translate(rm_gaps_tab)
+        try:
+            asvid = name_map[seqid]
+        except KeyError:
+            raise RuntimeError('unknown sequence id: {seqid}')
+
+        if seq in seqs:
+            if args.verbose:
+                print(f'dupe: {seqs[seq]} + {asvid}/{seqid}')
+            seqs[seq].append((asvid, seqid))
+            seqs[seq].sort()
+        else:
+            seqs[seq] = [(asvid, seqid)]
+    print(f' {len(seqs)} unique sequences')
+# sort by mothur-given-ASV id
+seqs = {i: j for i, j in sorted(seqs.items(), key=lambda x: x[1])}
+
+
+asv_dups = [[i for i, _ in ids] for ids in seqs.values() if len(ids) > 1]
+print(f'There are {len(asv_dups)} sets of duplicate sequences')
+dupe_listing_name = '.'.join(args.fasta_file.split('.')[:-1] + ['dupes'])
+with open(dupe_listing_name, 'w') as ofile:
+    print(f'Writing {dupe_listing_name} ...', end='', flush=True)
+    for ids in seqs.values():
+        ofile.write(','.join([f'{i}/{j}' for i, j in ids]))
+        ofile.write('\n')
+    print('[done]')
+
+
+fasta_out_name = list(args.fasta_file.rpartition('.'))
+fasta_out_name[1] = 'unique'
+fasta_out_name = '.'.join(fasta_out_name)
+with open(fasta_out_name, 'w') as ofile:
+    print(f'Writing {fasta_out_name} ...', end='', flush=True)
+    for seq, ids in seqs.items():
+        ids = ids[0][0] + ' ' + ','.join([i for _, i in ids])
+        ofile.write(f'>{ids}\n{seq}\n')
+    print('[done]')
+
+counts = []
+with open(args.shared_file) as ifile:
+    print(f'Loading counts from {args.shared_file} ...', end='', flush=True)
+    _, _, _, *asvids = ifile.readline().split()
+    for line in ifile:
+        _, group, _, *row = line.split()
+        counts.append((group, {k: int(v) for k, v in zip(asvids, row)}))
+    print(' [done]')
+
+print('Fixing counts...', end='', flush=True)
+asvids = set(asvids)
+for main_asv, *dups in asv_dups:
+    # dups: a list of the ASV IDs for sequences isdentical to main_asv
+    for _, group_counts in counts:
+        for i in dups:
+            # add dupe counts to keeper
+            group_counts[main_asv] += group_counts[i]
+            del group_counts[i]
+            asvids.discard(i)
+print(' [done]')
+asvids = sorted(asvids)
+print(f'Keeping {len(asvids)} ASVs')
+
+shared_out_name = list(args.shared_file.rpartition('.'))
+shared_out_name[1] = 'unique'
+shared_out_name = '.'.join(shared_out_name)
+with open(shared_out_name, 'w') as ofile:
+    print(f'Writing {shared_out_name} ...', end='', flush=True)
+    ofile.write('label\tGroup\tnumASVs\t')
+    ofile.write('\t'.join(asvids))
+    ofile.write('\n')
+    for group, group_counts in counts:
+        group_counts = [str(group_counts[i]) for i in asvids]
+        ofile.write('\t'.join(['asv', group, str(len(asvids))] + group_counts))
+        ofile.write('\n')
+    print('[done]')
